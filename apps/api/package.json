@@ -1,0 +1,31 @@
+{
+  "name": "sve-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "@fastify/cors": "^9.0.1",
+    "@fastify/formbody": "^7.4.0",
+    "@fastify/sensible": "^5.6.0",
+    "@fastify/multipart": "^7.7.3",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.12.0",
+    "undici": "^6.19.8",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/pg": "^8.6.6",
+    "@types/jsonwebtoken": "^9.0.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
