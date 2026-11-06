@@ -321,7 +321,7 @@ export function App() {
         fd.append('file', file)
         fd.append('silenceDb', String(silenceDb))
         fd.append('minSilenceSec', String(silenceMin))
-        const res = await fetch(`${API_BASE}/api/ffmpeg/jobs/silence-cutter`, { method: 'POST', body: fd })
+        const res = await apiFetch('/api/ffmpeg/jobs/silence-cutter', { method: 'POST', body: fd })
         const handled = await handleVideoResponse(res)
         if (!handled) alert('Error procesando silencio')
         return
@@ -331,7 +331,7 @@ export function App() {
         fd.append('file', file)
         fd.append('blur', String(blur))
         fd.append('format', String(format))
-        const res = await fetch(`${API_BASE}/api/ffmpeg/jobs/auto-916`, { method: 'POST', body: fd })
+        const res = await apiFetch('/api/ffmpeg/jobs/auto-916', { method: 'POST', body: fd })
         const handled = await handleVideoResponse(res)
         if (!handled) alert('Error procesando Auto 9:16')
         return
@@ -345,7 +345,7 @@ export function App() {
         fd.append('fontSize', String(fontSize))
         fd.append('color', color)
         if (bgColor) fd.append('bgColor', bgColor)
-        const res = await fetch(`${API_BASE}/api/ffmpeg/jobs/text-overlay`, { method: 'POST', body: fd })
+        const res = await apiFetch('/api/ffmpeg/jobs/text-overlay', { method: 'POST', body: fd })
         const handled = await handleVideoResponse(res)
         if (!handled) alert('Error procesando Texto fijo')
         return
@@ -353,12 +353,12 @@ export function App() {
     }
 
     if (silenceOn) {
-      await fetch(`${API_BASE}/api/ffmpeg/jobs/silence-cutter`, {
+      await apiFetch('/api/ffmpeg/jobs/silence-cutter', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fileUrl, silenceDb, minSilenceSec: silenceMin })
       })
     } else if (auto916On) {
-      await fetch(`${API_BASE}/api/ffmpeg/jobs/auto-916`, {
+      await apiFetch('/api/ffmpeg/jobs/auto-916', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fileUrl, blur, format })
       })

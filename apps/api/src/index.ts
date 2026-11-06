@@ -13,6 +13,8 @@ import { promisify } from 'node:util';
 import { Pool } from 'pg';
 import bcrypt from 'bcryptjs';
 import jwt, { JwtPayload } from 'jsonwebtoken';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 
 const pExecFile = promisify(execFile);
 
@@ -32,7 +34,12 @@ const PORT = Number(process.env.PORT || 4000);
 const UPLOAD_POST_API_BASE = process.env.UPLOAD_POST_API_BASE || 'https://api.upload-post.com';
 const UPLOAD_POST_API_KEY = process.env.UPLOAD_POST_API_KEY || '';
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const JWT_SECRET = process.env.JWT_SECRET || 'change_me_super_secret';
+const JWT_SECRET = process.env.JWT_SECRET || '';
+// Anyone who knows the secret can sign a token for any user, so refuse to start
+// with no secret, a short one, or the placeholder from env.sample.
+if (JWT_SECRET.length < 32 || JWT_SECRET === 'change_me_super_secret') {
+  throw new Error('JWT_SECRET must be set to a random string of at least 32 characters (e.g. `openssl rand -hex 32`)');
+}
 
 if (!DATABASE_URL) {
   throw new Error('Missing DATABASE_URL environment variable');
@@ -40,9 +47,6 @@ if (!DATABASE_URL) {
 
 const pool = new Pool({ connectionString: DATABASE_URL });
 
-if (!process.env.JWT_SECRET) {
-  server.log.warn('Using default JWT_SECRET; please set a strong secret via environment variable.');
-}
 
 await initializeDatabase();
 
@@ -157,10 +161,14 @@ function parsePlatforms(raw: unknown): string[] {
   return [];
 }
 
+// Fields the server sets itself: a caller must not add a second `user` (another profile).
+const RESERVED_FIELDS = new Set(['user', 'platform', 'platform[]', 'video', 'title']);
+
 function applyExtraFields(form: FormData, extra: Record<string, unknown> | undefined): void {
   if (!extra) return;
   for (const [key, value] of Object.entries(extra)) {
     if (value === undefined || value === null) continue;
+    if (RESERVED_FIELDS.has(key.trim().toLowerCase())) continue;
     if (Array.isArray(value)) {
       for (const item of value) {
         if (item === undefined || item === null) continue;
@@ -176,9 +184,52 @@ function applyExtraFields(form: FormData, extra: Record<string, unknown> | undef
   }
 }
 
-async function ensureUploadPostProfile(username: string): Promise<any> {
+function isPrivateAddress(ip: string): boolean {
+  if (isIP(ip) === 6) {
+    const v = ip.toLowerCase();
+    if (v.startsWith('::ffff:')) return isPrivateAddress(v.slice(7));
+    return v === '::' || v === '::1' || v.startsWith('fc') || v.startsWith('fd') || v.startsWith('fe80');
+  }
+  const [a, b] = ip.split('.').map(Number);
+  return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
+}
+
+// Fetch a user-supplied media URL: http(s) only, and every hop (redirects
+// included) must resolve to public addresses, so the API can't be pointed at
+// its own network (database, metadata endpoints, localhost services).
+async function fetchPublicUrl(rawUrl: string): Promise<Response> {
+  let current = new URL(rawUrl);
+  for (let hop = 0; hop < 5; hop++) {
+    if (current.protocol !== 'https:' && current.protocol !== 'http:') {
+      throw Object.assign(new Error('fileUrl must be http(s)'), { status: 400 });
+    }
+    const host = current.hostname.replace(/^\[|\]$/g, '');
+    const addrs = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
+    if (!addrs.length || addrs.some((a) => isPrivateAddress(a.address))) {
+      throw Object.assign(new Error('fileUrl must point to a public host'), { status: 400 });
+    }
+    const res = await fetch(current, { redirect: 'manual' });
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      current = new URL(res.headers.get('location')!, current);
+      continue;
+    }
+    return res;
+  }
+  throw Object.assign(new Error('fileUrl redirected too many times'), { status: 400 });
+}
+
+async function ensureUploadPostProfile(username: string, mustCreate = false): Promise<any> {
   const profileUrl = joinUrl(UPLOAD_POST_API_BASE, `/api/uploadposts/users/${encodeURIComponent(username)}`);
   const existing = await fetch(profileUrl, { headers: { ...authHeader() } });
+  // A new account must get a NEW profile: reusing one that already exists in the
+  // operator's Upload-Post account would hand its connected socials to a stranger.
+  if (mustCreate && existing.ok) {
+    const err: any = new Error('upload_post_profile_exists');
+    err.status = 409;
+    err.body = 'username_taken';
+    throw err;
+  }
   if (existing.status === 404) {
     const createRes = await fetch(joinUrl(UPLOAD_POST_API_BASE, '/api/uploadposts/users'), {
       method: 'POST',
@@ -271,7 +322,7 @@ async function buildUploadVideoFormFromJson(username: string, data: {
   if (data.scheduleDate) form.append('scheduled_date', data.scheduleDate);
   if (typeof data.asyncUpload === 'boolean') form.append('async_upload', data.asyncUpload ? 'true' : 'false');
 
-  const inputRes = await fetch(data.fileUrl);
+  const inputRes = await fetchPublicUrl(data.fileUrl);
   if (!inputRes.ok) {
     throw new Error('Could not download fileUrl for upload');
   }
@@ -317,6 +368,16 @@ function joinUrl(base: string, path: string): string {
   return `${base.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
 }
 
+// Every /api route spends the operator's Upload-Post key or server CPU: all of
+// them need a logged-in user except register/login.
+const PUBLIC_API_ROUTES = new Set(['/api/auth/register', '/api/auth/login']);
+server.addHook('preHandler', async (req, reply) => {
+  const path = req.url.split('?')[0];
+  if (req.method === 'OPTIONS' || !path.startsWith('/api/') || PUBLIC_API_ROUTES.has(path)) return;
+  await requireAuth(req, reply);
+  if (reply.sent) return reply;
+});
+
 server.get('/health', async () => ({ ok: true }));
 server.get('/favicon.ico', async (req, reply) => { reply.code(204); return reply.send(); });
 server.get('/api/local/silence-cutter', async (req, reply) => { reply.code(405); return { error: 'Use POST multipart with file' }; });
@@ -350,9 +411,11 @@ server.post('/api/auth/register', async (req, reply) => {
     return reply.internalServerError('register_failed');
   }
   try {
-    await ensureUploadPostProfile(user.username);
+    await ensureUploadPostProfile(user.username, true);
   } catch (err: any) {
     server.log.error({ tag: 'register', step: 'ensureUploadPostProfile', err });
+    // Don't leave a local account without its own profile behind.
+    await pool.query('DELETE FROM users WHERE id = $1', [user.id]).catch(() => undefined);
     return reply.code(err?.status || 502).send({ error: 'upload_post_profile_failed', details: err?.body || err?.message || 'unknown_error' });
   }
   const token = signUserToken(user);
@@ -596,8 +659,14 @@ server.post('/api/social/upload-video', async (req, reply) => {
 server.get('/api/analytics/:profileUsername', async (req, reply) => {
   const paramsSchema = z.object({ profileUsername: z.string().min(1) });
   const querySchema = z.object({ platforms: z.string().min(1) });
+  const user = await requireAuth(req, reply);
+  if (reply.sent) return reply;
   const { profileUsername } = paramsSchema.parse(req.params);
   const { platforms } = querySchema.parse(req.query);
+  // The operator key can read every profile: only the caller's own is allowed.
+  if (profileUsername.toLowerCase() !== user.username.toLowerCase()) {
+    return reply.forbidden('not_your_profile');
+  }
   const url = `${UPLOAD_POST_API_BASE}/api/analytics/${encodeURIComponent(profileUsername)}?platforms=${encodeURIComponent(platforms)}`;
   const res = await fetch(url, { headers: { ...authHeader() } });
   const body = await res.text();
@@ -636,7 +705,7 @@ server.post('/api/ffmpeg/jobs', async (req, reply) => {
     const { fileUrl, fullCommand, outputExtension } = bodySchema.parse(req.body);
 
     const form = new FormData();
-    const inputRes = await fetch(fileUrl);
+    const inputRes = await fetchPublicUrl(fileUrl);
     if (!inputRes.ok) {
       return reply.badRequest('Could not fetch input fileUrl');
     }
@@ -674,7 +743,7 @@ server.post('/api/ffmpeg/jobs/silence-cutter', async (req, reply) => {
     } else {
       const bodySchema = z.object({ fileUrl: z.string().url(), silenceDb: z.number().default(defaultSilenceDb), minSilenceSec: z.number().default(defaultMinSilenceSec) });
       const { fileUrl, silenceDb, minSilenceSec } = bodySchema.parse(req.body);
-      const res = await fetch(fileUrl); if (!res.ok) return reply.badRequest('Could not fetch input fileUrl');
+      const res = await fetchPublicUrl(fileUrl); if (!res.ok) return reply.badRequest('Could not fetch input fileUrl');
       const buf = new Uint8Array(await res.arrayBuffer());
       const outBuf = await cutSilences(buf, 'input', silenceDb, minSilenceSec);
       reply.header('Content-Type', 'video/mp4');
@@ -809,7 +878,7 @@ async function downloadUploadPostResultFrom(statusUrl: string, resultUrl?: strin
 }
 
 async function formFromUrlAndCmd(fileUrl: string, fullCommand: string, outputExtension: string): Promise<FormData> {
-  const inputRes = await fetch(fileUrl);
+  const inputRes = await fetchPublicUrl(fileUrl);
   if (!inputRes.ok) {
     throw new Error('Could not fetch input fileUrl');
   }
