@@ -44,7 +44,7 @@ services:
       PORT: ${PORT:-4000}
       DATABASE_URL: ${DATABASE_URL:-postgresql://sveditor:sveditor_password@postgres:5432/sveditor}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      JWT_SECRET: ${JWT_SECRET:-change_me_super_secret}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -hex 32)}
       UPLOAD_POST_API_BASE: ${UPLOAD_POST_API_BASE:-https://api.upload-post.com}
       UPLOAD_POST_API_KEY: "upload_post_api_key"
       UPLOAD_POST_WEBHOOK_SECRET: ${UPLOAD_POST_WEBHOOK_SECRET:-replace_with_webhook_secret}
